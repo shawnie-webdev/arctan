@@ -1,5 +1,7 @@
 import os
 import time
+import random
+import struct
 
 class cpucode:
     @staticmethod
@@ -96,8 +98,17 @@ class MemoryManager:
 
     def __getitem__(self, addr: int | slice) -> int:
         if isinstance(addr, slice):
-            raw = bytes(self[a] for a in range(addr.start, addr.stop))
+            # Normalize and bound the slice to this memory bus. This prevents
+            # malformed/unbounded slices from iterating indefinitely.
+            start, stop, step = addr.indices(self.max_addr)
+            raw = bytearray()
+
+            for address in range(start, stop, step):
+                dev, offset = self._find_device(address)
+                raw.append(dev.mem[offset])
+
             return int.from_bytes(raw, byteorder=self.endian)
+
         dev, offset = self._find_device(addr)
         return dev.mem[offset]
 
@@ -159,8 +170,20 @@ class RegisterManager(MemoryManager):
     def get_reg(self, reg_idx: int) -> int:
         if not 0 <= reg_idx < 16:
             raise IndexError(f"Register index {reg_idx} out of range (0-15)")
+
+        # Each register is backed by its own 8-byte MemoryDevice. Read that
+        # device directly instead of routing an 8-byte register read through
+        # MemoryManager.__getitem__ byte-by-byte.
         start = reg_idx * 8
-        return self[start : start + 8]
+        dev, offset = self._find_device(start)
+
+        if offset + 8 > dev.size:
+            raise IndexError(f"Register R{reg_idx} crosses a memory-device boundary")
+
+        return int.from_bytes(
+            dev.mem[offset : offset + 8],
+            byteorder=self.endian,
+        )
 
     def get_reg_as(self, reg_idx: int, kind: str = "n") -> float | int:
         """Read register `reg_idx` as:

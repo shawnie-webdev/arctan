@@ -297,8 +297,9 @@ def assemble_text(asm_text: str) -> bytes:
 
 class Motherboard:
     def __init__(self, rom_bytes: bytes | bytearray, ram_size: int = 4096):
+        self.rom_length = len(rom_bytes)
         self.nvfm = MemoryDevice(
-            size=max(1024, len(rom_bytes)),
+            size=max(1024, self.rom_length),
             read_only=True,
             initial_data=rom_bytes,
             endian="big",
@@ -315,7 +316,7 @@ class CPU:
         self.pc = 0
         self.is_reading_nvfm = True
         self.motherboard = motherboard
-        self.rom_length = len(motherboard.nvfm.mem)
+        self.rom_length = motherboard.rom_length
         self.register = RegisterManager(endian="big")
         self.eval_bit = False
         self.is_halted = False

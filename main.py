@@ -228,6 +228,7 @@ class RegisterManager(MemoryManager):
             raise IndexError(f"Register index {reg_idx} out of range (0-15)")
         super().set_bits(reg_idx * 8, start_bit, end_bit, value, num_bytes=8)
 
+import pygame
 
 class VideoMemory(MemoryDevice):
     def __init__(self, width: int = 128, height: int = 128):
@@ -236,15 +237,55 @@ class VideoMemory(MemoryDevice):
         self.height = height
 
     def to_rgb_bytes(self) -> bytes:
-        """Converts 1-byte-per-pixel RGB332 data into a flat RGB24 byte buffer for fast rendering."""
+        """Converts RGB332 pixels into RGB24."""
         out = bytearray(self.size * 3)
+
         for i, byte in enumerate(self.mem):
             base = i * 3
-            out[base] = ((byte >> 5) & 0b111) * 36      # R (0-252)
-            out[base + 1] = ((byte >> 2) & 0b111) * 36  # G (0-252)
-            out[base + 2] = (byte & 0b11) * 85          # B (0-255)
+            out[base] = ((byte >> 5) & 0b111) * 36
+            out[base + 1] = ((byte >> 2) & 0b111) * 36
+            out[base + 2] = (byte & 0b11) * 85
+
         return bytes(out)
 
+    def start_screen(self, scale: int = 4, fps: int = 60):
+        """Opens a window displaying video memory."""
+        pygame.init()
+
+        screen = pygame.display.set_mode((
+            self.width * scale,
+            self.height * scale
+        ))
+
+        pygame.display.set_caption("Arctan64 Display")
+
+        clock = pygame.time.Clock()
+        running = True
+
+        while running:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
+
+            rgb = self.to_rgb_bytes()
+
+            surface = pygame.image.frombuffer(
+                rgb,
+                (self.width, self.height),
+                "RGB"
+            )
+
+            scaled = pygame.transform.scale(
+                surface,
+                (self.width * scale, self.height * scale)
+            )
+
+            screen.blit(scaled, (0, 0))
+            pygame.display.flip()
+
+            clock.tick(fps)
+
+        pygame.quit()
 
 """ CONFIGS (cfg) """
 
@@ -313,9 +354,17 @@ class Motherboard:
         )
         self.mmio = MemoryManager(endian="big")
         self.mmio.attach(MemoryDevice(size=ram_size, endian="big"))
-        self.vram = VideoMemory(width=128, height=128)
-        self.mmio.attach(self.vram)
+        self.fbuffer = VideoMemory(width=128, height=128)
+        self.mmio.attach(self.fbuffer)
         self.cpu = CPU(self)
+
+    def poweron(self):
+        self.cpu.is_reading_nvfm = True
+        self.cpu.is_halted = False
+
+        self.fbuffer.start_screen(scale=4, fps=60)
+        while self.cpu.is_halted == False:
+            self.cpu.step()
 
 
 class CPU:
@@ -358,12 +407,59 @@ class CPU:
                 self.register.set_reg(args[0], args[1])
             case "MOV":
                 self.register.set_reg(args[0], self.register.get_reg(args[1]))
+
             case "ADD":
                 val = self.register.get_reg(args[0]) + self.register.get_reg(args[1])
                 self.register.set_reg(args[2], val)
             case "SUB":
-                val = self.register.get_reg(args[1]) - self.register.get_reg(args[2])
-                self.register.set_reg(args[0], val)
+                val = self.register.get_reg(args[0]) - self.register.get_reg(args[1])
+                self.register.set_reg(args[2], val)
+            case "MUL":
+                val = self.register.get_reg(args[0]) * self.register.get_reg(args[1])
+                self.register.set_reg(args[2], val)
+            case "DIV":
+                val = round( self.register.get_reg(args[0]) / self.register.get_reg(args[1]) )
+                self.register.set_reg(args[2], val)
+
+            case "IADD":
+                val = self.register.get_reg(args[0]) + args[1]
+                self.register.set_reg(args[2], val)
+            case "ISUB":
+                val = self.register.get_reg(args[0]) - args[1]
+                self.register.set_reg(args[2], val)
+            case "IMUL":
+                val = self.register.get_reg(args[0]) * args[1]
+                self.register.set_reg(args[2], val)
+            case "IDIV":
+                val = round(self.register.get_reg(args[0]) / args[1])
+                self.register.set_reg(args[2], val)
+
+            case "SADD":
+                val = self.register.get_reg_as(args[0], 's') + self.register.get_reg_as(args[1], 's')
+                self.register.set_reg(args[2], val)
+            case "SSUB":
+                val = self.register.get_reg_as(args[0], 's') - self.register.get_reg_as(args[1], 's')
+                self.register.set_reg(args[2], val)
+            case "SMUL":
+                val = self.register.get_reg_as(args[0], 's') * self.register.get_reg_as(args[1], 's')
+                self.register.set_reg(args[2], val)
+            case "SDIV":
+                val = round(self.register.get_reg_as(args[0], 's') / self.register.get_reg_as(args[1], 's'))
+                self.register.set_reg(args[2], val)
+
+            case "FADD":
+                val = self.register.get_reg_as(args[0], 'f') + self.register.get_reg_as(args[1], 'f')
+                self.register.set_reg(args[2], val)
+            case "FSUB":
+                val = self.register.get_reg_as(args[0], 'f') - self.register.get_reg_as(args[1], 'f')
+                self.register.set_reg(args[2], val)
+            case "FMUL":
+                val = self.register.get_reg_as(args[0], 'f') * self.register.get_reg_as(args[1], 'f')
+                self.register.set_reg(args[2], val)
+            case "FDIV":
+                val = round( self.register.get_reg_as(args[0], 'f') / self.register.get_reg_as(args[1], 'f') )
+                self.register.set_reg(args[2], val)
+
             case "PRINT":
                 print(self.register.get_reg(args[0]))
             case "EVAL_ET":
@@ -379,7 +475,7 @@ class CPU:
             case "EVAL_LTE":
                 self.eval_bit = self.register.get_reg(args[0]) >= self.register.get_reg(args[1])
             case "JMP":
-                self.pc = self.register.get_reg(args[0])
+                self.pc = self.register.get_reg(args[0]) - 1
             case "JMPIF":
                 if self.eval_bit == True:
                     self.pc = self.register.get_reg(args[0]) - 1
@@ -409,5 +505,4 @@ if __name__ == "__main__":
 
     board = Motherboard(NVFM_PROGRAM_CODE)
     num_instructions = len(NVFM_PROGRAM_CODE) // 2
-    while board.cpu.is_halted == False:
-        board.cpu.step()
+    boarad.poweron()

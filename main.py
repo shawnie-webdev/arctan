@@ -7,16 +7,33 @@ import time
 from pathlib import Path
 
 
-# Arctan64 uses a 24-bit fixed-width instruction:
-#   bits 23..19: 5-bit opcode (up to 32 instructions)
-#   bits 18..0 : operands, packed according to configs.json
-# Register operands are 4 bits; immediate operands are 8 bits.
-INSTRUCTION_BYTES = 3
-INSTRUCTION_BITS = INSTRUCTION_BYTES * 8
-OPCODE_BITS = 5
-OPERAND_BITS = INSTRUCTION_BITS - OPCODE_BITS
-UINT64_MASK = (1 << 64) - 1
 BASE_DIR = Path(__file__).resolve().parent
+CONFIG_PATH = BASE_DIR / "configs.json"
+
+try:
+    with CONFIG_PATH.open("r", encoding="utf-8") as _config_file:
+        ARCH_CONFIG = json.load(_config_file)
+except FileNotFoundError as exc:
+    raise FileNotFoundError(f"Config file not found: {CONFIG_PATH}") from exc
+except json.JSONDecodeError as exc:
+    raise ValueError(f"Invalid JSON in {CONFIG_PATH}: {exc}") from exc
+
+ARCHITECTURE = ARCH_CONFIG.get("architecture", {})
+INSTRUCTION_BYTES = ARCHITECTURE.get("instruction_size_bytes", 3)
+OPCODE_BITS = ARCHITECTURE.get("opcode_bits", 5)
+ENDIANNESS = ARCHITECTURE.get("endianness", "big")
+if not isinstance(INSTRUCTION_BYTES, int) or INSTRUCTION_BYTES < 1:
+    raise ValueError("architecture.instruction_size_bytes must be positive")
+if not isinstance(OPCODE_BITS, int) or OPCODE_BITS < 1:
+    raise ValueError("architecture.opcode_bits must be positive")
+if ENDIANNESS not in ("big", "little"):
+    raise ValueError("architecture.endianness must be 'big' or 'little'")
+
+INSTRUCTION_BITS = INSTRUCTION_BYTES * 8
+OPERAND_BITS = INSTRUCTION_BITS - OPCODE_BITS
+if OPERAND_BITS <= 0:
+    raise ValueError("Instruction format leaves no bits for operands")
+UINT64_MASK = (1 << 64) - 1
 
 
 class cpucode:
@@ -353,20 +370,22 @@ class VideoMemory(MemoryDevice):
             pygame.quit()
 
 
-# Load and validate the instruction table.
-try:
-    with (BASE_DIR / "configs.json").open("r", encoding="utf-8") as file:
-        _cfg = json.load(file)
-    inst_format = _cfg["inst_format"]
-except FileNotFoundError as exc:
-    raise FileNotFoundError(f"Config file not found: {BASE_DIR / 'configs.json'}") from exc
-except (json.JSONDecodeError, KeyError) as exc:
-    raise ValueError("configs.json must contain a valid 'inst_format' object") from exc
+# Load and validate the instruction table from the shared architecture config.
+inst_format = ARCH_CONFIG.get("inst_format")
+if not isinstance(inst_format, dict) or not inst_format:
+    raise ValueError("configs.json must contain a non-empty 'inst_format' object")
 
-if not isinstance(inst_format, dict):
-    raise TypeError("configs.json 'inst_format' must be an object")
+_operand_types = ARCH_CONFIG.get("operand_types", {
+    "r": {"bits": 4},
+    "n": {"bits": 8},
+})
+datatype_len = {
+    kind: definition.get("bits") if isinstance(definition, dict) else definition
+    for kind, definition in _operand_types.items()
+}
+if any(not isinstance(bits, int) or bits < 1 for bits in datatype_len.values()):
+    raise ValueError("Every operand type must define a positive bit width")
 
-datatype_len = {"r": 4, "n": 8}
 instruction = {}
 for name, fmt in inst_format.items():
     mnemonic = name.upper()
@@ -475,10 +494,10 @@ class Motherboard:
             size=max(1024, self.rom_length),
             read_only=True,
             initial_data=rom_bytes,
-            endian="big",
+            endian=ENDIANNESS,
         )
-        self.mmio = MemoryManager(endian="big")
-        self.mmio.attach(MemoryDevice(size=ram_size, endian="big"))
+        self.mmio = MemoryManager(endian=ENDIANNESS)
+        self.mmio.attach(MemoryDevice(size=ram_size, endian=ENDIANNESS))
         self.fbuffer = VideoMemory(width=128, height=128)
         self.mmio.attach(self.fbuffer)
         self.cpu = CPU(self)
@@ -529,7 +548,7 @@ class CPU:
         self.pc = 0
         self.motherboard = motherboard
         self.rom_length = motherboard.rom_length
-        self.register = RegisterManager(endian="big")
+        self.register = RegisterManager(endian=ENDIANNESS)
         self.eval_bit = False
         self.is_halted = False
         self.stop_event = threading.Event()
@@ -551,7 +570,7 @@ class CPU:
         raw = self.motherboard.nvfm.mem[
             address:address + INSTRUCTION_BYTES
         ]
-        return int.from_bytes(raw, byteorder="big")
+        return int.from_bytes(raw, byteorder=ENDIANNESS)
 
     @staticmethod
     def _signed_divide(left: int, right: int) -> int:

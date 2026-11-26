@@ -179,6 +179,13 @@ class RegisterManager(MemoryManager):
         if not 0 <= reg_idx < 16:
             raise IndexError(f"Register index {reg_idx} out of range (0-15)")
 
+        # Special registers are computed when read rather than stored in
+        # their backing memory devices. This keeps CLK synchronized with
+        # tick(), and makes RR/RTC behave as their definitions describe.
+        special_name = self.INDEX_TO_SPECIAL.get(reg_idx)
+        if special_name is not None:
+            return self._read_special_raw(special_name)
+
         dev = self.devices[reg_idx]
         return int.from_bytes(dev.mem[:8], byteorder=self.endian)
 

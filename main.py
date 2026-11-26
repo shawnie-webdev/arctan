@@ -477,7 +477,7 @@ def assemble_text(asm_text: str) -> bytes:
                 )
             word |= value << cursor
 
-        output.extend(word.to_bytes(INSTRUCTION_BYTES, byteorder="big"))
+        output.extend(word.to_bytes(INSTRUCTION_BYTES, byteorder=ENDIANNESS))
 
     return bytes(output)
 

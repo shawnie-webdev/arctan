@@ -498,6 +498,10 @@ class Motherboard:
             except BaseException as exc:
                 errors.append(exc)
                 self.cpu.is_halted = True
+            finally:
+                # Stop the display loop when the CPU halts, reaches ROM end,
+                # or raises an execution error.
+                self.cpu.stop_event.set()
 
         worker = threading.Thread(target=cpu_worker, name="Arctan64-CPU")
         worker.start()

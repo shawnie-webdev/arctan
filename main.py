@@ -348,7 +348,7 @@ class CPU:
                 self.pc = self.register.get_reg(args[0])
             case "JMPIF":
                 if self.eval_bit == True:
-                    self.pc = self.register.get_reg(args[0])
+                    self.pc = self.register.get_reg(args[0]) - 1
             case "HALT":
                 self.is_halted = True
 

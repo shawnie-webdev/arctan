@@ -1,7 +1,23 @@
+import json
 import os
-import time
 import random
 import struct
+import threading
+import time
+from pathlib import Path
+
+
+# Arctan64 uses a 24-bit fixed-width instruction:
+#   bits 23..19: 5-bit opcode (up to 32 instructions)
+#   bits 18..0 : operands, packed according to configs.json
+# Register operands are 4 bits; immediate operands are 8 bits.
+INSTRUCTION_BYTES = 3
+INSTRUCTION_BITS = INSTRUCTION_BYTES * 8
+OPCODE_BITS = 5
+OPERAND_BITS = INSTRUCTION_BITS - OPCODE_BITS
+UINT64_MASK = (1 << 64) - 1
+BASE_DIR = Path(__file__).resolve().parent
+
 
 class cpucode:
     @staticmethod
@@ -15,138 +31,185 @@ class cpucode:
 
 def _extract_bits(val: int, start_bit: int, end_bit: int, max_bits: int) -> int:
     if not (0 <= start_bit <= end_bit < max_bits):
-        raise ValueError(f"Bit range must satisfy 0 <= start_bit <= end_bit < {max_bits}")
-    num_bits = end_bit - start_bit + 1
-    mask = (1 << num_bits) - 1
-    return (val >> start_bit) & mask
+        raise ValueError(
+            f"Bit range must satisfy 0 <= start_bit <= end_bit < {max_bits}"
+        )
+    return (val >> start_bit) & ((1 << (end_bit - start_bit + 1)) - 1)
 
 
-def _insert_bits(orig_val: int, start_bit: int, end_bit: int, new_bits: int, max_bits: int) -> int:
+def _insert_bits(orig_val: int, start_bit: int, end_bit: int,
+                 new_bits: int, max_bits: int) -> int:
     if not (0 <= start_bit <= end_bit < max_bits):
-        raise ValueError(f"Bit range must satisfy 0 <= start_bit <= end_bit < {max_bits}")
-    num_bits = end_bit - start_bit + 1
-    mask = (1 << num_bits) - 1
-    cleared = orig_val & ~(mask << start_bit)
-    return cleared | ((new_bits & mask) << start_bit)
+        raise ValueError(
+            f"Bit range must satisfy 0 <= start_bit <= end_bit < {max_bits}"
+        )
+    width = end_bit - start_bit + 1
+    if not isinstance(new_bits, int) or new_bits < 0 or new_bits >= (1 << width):
+        raise ValueError(f"Value does not fit in {width} bits")
+    mask = ((1 << width) - 1) << start_bit
+    return (orig_val & ~mask) | (new_bits << start_bit)
 
 
 class MemoryDevice:
-    def __init__(self, size=1024, read_only=False, initial_data=None, endian: str = "big"):
+    def __init__(self, size=1024, read_only=False, initial_data=None,
+                 endian: str = "big"):
+        if not isinstance(size, int) or size < 0:
+            raise ValueError("Memory size must be a non-negative integer")
+        if endian not in ("big", "little"):
+            raise ValueError("Endian must be 'big' or 'little'")
+
         self.size = size
         self.read_only = read_only
         self.endian = endian
-        self.f = 0  # From address (inclusive)
-        self.t = 0  # To address (exclusive)
+        self.f = 0
+        self.t = 0
 
-        if initial_data:
+        if initial_data is not None:
             if len(initial_data) > size:
                 raise ValueError("Initial data exceeds device size")
             raw = bytearray(size)
-            raw[: len(initial_data)] = initial_data
-            self.mem = memoryview(bytes(raw) if read_only else raw)
+            raw[:len(initial_data)] = initial_data
         else:
-            self.mem = memoryview(bytes(size) if read_only else bytearray(size))
+            raw = bytearray(size)
 
-    def get_bits(self, addr: int, start_bit: int, end_bit: int, num_bytes: int | None = None) -> int:
-        """Extracts bits [start_bit..end_bit] starting at local device address `addr`."""
+        self.mem = memoryview(bytes(raw) if read_only else raw)
+
+    def get_bits(self, addr: int, start_bit: int, end_bit: int,
+                 num_bytes: int | None = None) -> int:
         if num_bytes is None:
             num_bytes = (end_bit // 8) + 1
-        if addr < 0 or addr + num_bytes > self.size:
-            raise IndexError(f"Address range {hex(addr)}..{hex(addr + num_bytes)} out of device bounds")
+        if addr < 0 or num_bytes < 1 or addr + num_bytes > self.size:
+            raise IndexError("Memory bit-read is outside the device")
+        value = int.from_bytes(self.mem[addr:addr + num_bytes],
+                               byteorder=self.endian)
+        return _extract_bits(value, start_bit, end_bit, num_bytes * 8)
 
-        val = int.from_bytes(self.mem[addr : addr + num_bytes], byteorder=self.endian)
-        return _extract_bits(val, start_bit, end_bit, num_bytes * 8)
-
-    def set_bits(self, addr: int, start_bit: int, end_bit: int, value: int, num_bytes: int | None = None):
-        """Updates bits [start_bit..end_bit] starting at local device address `addr`."""
+    def set_bits(self, addr: int, start_bit: int, end_bit: int, value: int,
+                 num_bytes: int | None = None):
         if self.read_only:
-            raise PermissionError(f"Cannot write to read-only memory at {hex(addr)}")
+            raise PermissionError("Cannot write to read-only memory")
         if num_bytes is None:
             num_bytes = (end_bit // 8) + 1
-        if addr < 0 or addr + num_bytes > self.size:
-            raise IndexError(f"Address range {hex(addr)}..{hex(addr + num_bytes)} out of device bounds")
-
-        orig_val = int.from_bytes(self.mem[addr : addr + num_bytes], byteorder=self.endian)
-        updated_val = _insert_bits(orig_val, start_bit, end_bit, value, num_bytes * 8)
-        self.mem[addr : addr + num_bytes] = updated_val.to_bytes(num_bytes, byteorder=self.endian)
+        if addr < 0 or num_bytes < 1 or addr + num_bytes > self.size:
+            raise IndexError("Memory bit-write is outside the device")
+        original = int.from_bytes(self.mem[addr:addr + num_bytes],
+                                  byteorder=self.endian)
+        updated = _insert_bits(original, start_bit, end_bit, value,
+                               num_bytes * 8)
+        self.mem[addr:addr + num_bytes] = updated.to_bytes(
+            num_bytes, byteorder=self.endian
+        )
 
 
 class MemoryManager:
     def __init__(self, endian: str = "big"):
+        if endian not in ("big", "little"):
+            raise ValueError("Endian must be 'big' or 'little'")
         self.devices = []
         self.max_addr = 0
         self.endian = endian
 
     def attach(self, device: MemoryDevice):
+        if not isinstance(device, MemoryDevice):
+            raise TypeError("Only MemoryDevice instances can be attached")
         device.f = self.max_addr
         device.t = self.max_addr + device.size
-        device.endian = self.endian  # Keep device endianness synced with bus
+        device.endian = self.endian
         self.devices.append(device)
         self.max_addr = device.t
 
     def _find_device(self, addr: int) -> tuple[MemoryDevice, int]:
-        for dev in self.devices:
-            if dev.f <= addr < dev.t:
-                return dev, addr - dev.f
-        raise IndexError(f"Segmentation fault: unmapped address {hex(addr)}")
-
-    def _write_single_byte(self, addr: int, byte_val: int):
-        dev, offset = self._find_device(addr)
-        if dev.read_only:
-            raise PermissionError(f"Cannot write to read-only memory at {hex(addr)}")
-        dev.mem[offset] = byte_val
+        if not isinstance(addr, int) or addr < 0 or addr >= self.max_addr:
+            raise IndexError(f"Unmapped memory address: {addr!r}")
+        for device in self.devices:
+            if device.f <= addr < device.t:
+                return device, addr - device.f
+        raise IndexError(f"Unmapped memory address: {addr}")
 
     def __getitem__(self, addr: int | slice) -> int:
         if isinstance(addr, slice):
-            # Normalize and bound the slice to this memory bus. This prevents
-            # malformed/unbounded slices from iterating indefinitely.
-            start, stop, step = addr.indices(self.max_addr)
+            if addr.step not in (None, 1):
+                raise ValueError("Memory slices only support a step of 1")
+            if addr.start is None or addr.stop is None:
+                raise ValueError("Memory slices require explicit start and stop")
+            start, stop = addr.start, addr.stop
+            if not isinstance(start, int) or not isinstance(stop, int):
+                raise TypeError("Memory slice bounds must be integers")
+            if start < 0 or stop < start or stop > self.max_addr:
+                raise IndexError("Memory slice is outside the address space")
             raw = bytearray()
-
-            for address in range(start, stop, step):
-                dev, offset = self._find_device(address)
-                raw.append(dev.mem[offset])
-
+            for address in range(start, stop):
+                device, offset = self._find_device(address)
+                raw.append(device.mem[offset])
             return int.from_bytes(raw, byteorder=self.endian)
 
-        dev, offset = self._find_device(addr)
-        return dev.mem[offset]
+        device, offset = self._find_device(addr)
+        return device.mem[offset]
 
     def __setitem__(self, addr: int | slice, value: int):
+        if not isinstance(value, int) or value < 0:
+            raise ValueError("Memory values must be non-negative integers")
+
         if isinstance(addr, slice):
-            start = addr.start
-            num_bytes = addr.stop - start
-        else:
-            start = addr
-            num_bytes = max(1, (value.bit_length() + 7) // 8)
+            if addr.step not in (None, 1):
+                raise ValueError("Memory slices only support a step of 1")
+            if addr.start is None or addr.stop is None:
+                raise ValueError("Memory slices require explicit start and stop")
+            start, stop = addr.start, addr.stop
+            if not isinstance(start, int) or not isinstance(stop, int):
+                raise TypeError("Memory slice bounds must be integers")
+            if start < 0 or stop < start or stop > self.max_addr:
+                raise IndexError("Memory slice is outside the address space")
+            count = stop - start
+            if count == 0:
+                if value != 0:
+                    raise ValueError("Cannot write a non-zero value to an empty slice")
+                return
+            if value.bit_length() > count * 8:
+                raise OverflowError(f"Value does not fit in {count} bytes")
+            raw = value.to_bytes(count, byteorder=self.endian)
+            targets = [self._find_device(start + i) for i in range(count)]
+            # Validate the entire write before changing any byte.
+            for device, _ in targets:
+                if device.read_only:
+                    raise PermissionError("Cannot write to read-only memory")
+            for (device, offset), byte_value in zip(targets, raw):
+                device.mem[offset] = byte_value
+            return
 
-        raw_bytes = value.to_bytes(num_bytes, byteorder=self.endian)
-        for i, byte_val in enumerate(raw_bytes):
-            self._write_single_byte(start + i, byte_val)
+        if not isinstance(addr, int):
+            raise TypeError("Memory address must be an integer or slice")
+        if value > 0xFF:
+            raise OverflowError("A single-byte memory write must be between 0 and 255")
+        device, offset = self._find_device(addr)
+        if device.read_only:
+            raise PermissionError(f"Cannot write to read-only memory at {addr:#x}")
+        device.mem[offset] = value
 
-    def get_bits(self, addr: int, start_bit: int, end_bit: int, num_bytes: int | None = None) -> int:
-        """Extracts bits [start_bit..end_bit] starting at mapped bus address `addr`."""
+    def get_bits(self, addr: int, start_bit: int, end_bit: int,
+                 num_bytes: int | None = None) -> int:
         if num_bytes is None:
             num_bytes = (end_bit // 8) + 1
-        val = self[addr : addr + num_bytes]
-        return _extract_bits(val, start_bit, end_bit, num_bytes * 8)
+        if num_bytes < 1:
+            raise ValueError("num_bytes must be positive")
+        return _extract_bits(self[addr:addr + num_bytes], start_bit,
+                             end_bit, num_bytes * 8)
 
-    def set_bits(self, addr: int, start_bit: int, end_bit: int, value: int, num_bytes: int | None = None):
-        """Updates bits [start_bit..end_bit] starting at mapped bus address `addr`."""
+    def set_bits(self, addr: int, start_bit: int, end_bit: int, value: int,
+                 num_bytes: int | None = None):
         if num_bytes is None:
             num_bytes = (end_bit // 8) + 1
-        orig_val = self[addr : addr + num_bytes]
-        updated_val = _insert_bits(orig_val, start_bit, end_bit, value, num_bytes * 8)
-        self[addr : addr + num_bytes] = updated_val
+        if num_bytes < 1:
+            raise ValueError("num_bytes must be positive")
+        original = self[addr:addr + num_bytes]
+        updated = _insert_bits(original, start_bit, end_bit, value,
+                               num_bytes * 8)
+        self[addr:addr + num_bytes] = updated
 
 
 class RegisterManager(MemoryManager):
-    SPECIAL_REGS = {
-        "RR": 13,   # Random register (fresh 64-bit value on read)
-        "RTC": 14,  # Real-time clock (Unix timestamp / epoch ms)
-        "CLK": 15,  # Clock / step counter
-    }
-    INDEX_TO_SPECIAL = {v: k for k, v in SPECIAL_REGS.items()}
+    SPECIAL_REGS = {"RR": 13, "RTC": 14, "CLK": 15}
+    INDEX_TO_SPECIAL = {index: name for name, index in SPECIAL_REGS.items()}
 
     def __init__(self, endian: str = "big"):
         super().__init__(endian)
@@ -155,80 +218,80 @@ class RegisterManager(MemoryManager):
             super().attach(MemoryDevice(size=8, endian=endian))
 
     def tick(self, steps: int = 1):
-        """Advance the CLK register counter."""
-        self.clk_ticks = (self.clk_ticks + steps) & 0xFFFFFFFFFFFFFFFF
+        self.clk_ticks = (self.clk_ticks + steps) & UINT64_MASK
 
     def _read_special_raw(self, name: str) -> int:
         if name == "RR":
             return random.getrandbits(64)
         if name == "RTC":
-            return int(time.time() * 1000) & 0xFFFFFFFFFFFFFFFF
+            return int(time.time() * 1000) & UINT64_MASK
         if name == "CLK":
-            return self.clk_ticks & 0xFFFFFFFFFFFFFFFF
+            return self.clk_ticks
         raise KeyError(f"Unknown special register: {name}")
 
-    def _find_device(self, addr: int) -> tuple[MemoryDevice, int]:
-        # RegisterManager maps exactly one 8-byte device to each register.
-        # Avoid scanning every device for every register access.
-        if not 0 <= addr < 16 * 8:
-            raise IndexError(f"Segmentation fault: unmapped register address {hex(addr)}")
-        reg_idx, offset = divmod(addr, 8)
-        return self.devices[reg_idx], offset
-
     def get_reg(self, reg_idx: int) -> int:
-        if not 0 <= reg_idx < 16:
-            raise IndexError(f"Register index {reg_idx} out of range (0-15)")
-
-        # Special registers are computed when read rather than stored in
-        # their backing memory devices. This keeps CLK synchronized with
-        # tick(), and makes RR/RTC behave as their definitions describe.
-        special_name = self.INDEX_TO_SPECIAL.get(reg_idx)
-        if special_name is not None:
-            return self._read_special_raw(special_name)
-
-        dev = self.devices[reg_idx]
-        return int.from_bytes(dev.mem[:8], byteorder=self.endian)
+        if not isinstance(reg_idx, int) or not 0 <= reg_idx < 16:
+            raise IndexError(f"Register index {reg_idx!r} out of range (0-15)")
+        special = self.INDEX_TO_SPECIAL.get(reg_idx)
+        if special is not None:
+            return self._read_special_raw(special)
+        return int.from_bytes(self.devices[reg_idx].mem[:8],
+                              byteorder=self.endian)
 
     def get_reg_as(self, reg_idx: int, kind: str = "n") -> float | int:
-        """Read register `reg_idx` as:
-        - 'f': float64 (IEEE 754 floating-point)
-        - 's': signed 64-bit two's complement int
-        - 'n': normal (unsigned) 64-bit int
-        """
-        raw = self.get_reg(reg_idx) & 0xFFFFFFFFFFFFFFFF
-        fmt_prefix = ">" if self.endian == "big" else "<"
-
-        match kind.lower():
-            case "f":
-                return struct.unpack(f"{fmt_prefix}d", struct.pack(f"{fmt_prefix}Q", raw))[0]
-            case "s":
-                return struct.unpack(f"{fmt_prefix}q", struct.pack(f"{fmt_prefix}Q", raw))[0]
-            case "n":
-                return raw
-            case _:
-                raise ValueError(f"Unknown format '{kind}': expected 'f', 's', or 'n'")
+        raw = self.get_reg(reg_idx) & UINT64_MASK
+        prefix = ">" if self.endian == "big" else "<"
+        kind = kind.lower()
+        if kind == "n":
+            return raw
+        if kind == "s":
+            return struct.unpack(f"{prefix}q", struct.pack(f"{prefix}Q", raw))[0]
+        if kind == "f":
+            return struct.unpack(f"{prefix}d", struct.pack(f"{prefix}Q", raw))[0]
+        raise ValueError("Register kind must be 'n', 's', or 'f'")
 
     def set_reg(self, reg_idx: int, value: int):
-        if not 0 <= reg_idx < 16:
-            raise IndexError(f"Register index {reg_idx} out of range (0-15)")
-        if value < 0:
-            value &= 0xFFFFFFFFFFFFFFFF
-        dev = self.devices[reg_idx]
-        dev.mem[:8] = (value & 0xFFFFFFFFFFFFFFFF).to_bytes(8, byteorder=self.endian)
+        if not isinstance(reg_idx, int) or not 0 <= reg_idx < 16:
+            raise IndexError(f"Register index {reg_idx!r} out of range (0-15)")
+        if reg_idx in self.INDEX_TO_SPECIAL:
+            raise PermissionError(f"R{reg_idx} is a read-only special register")
+        if not isinstance(value, int):
+            raise TypeError("Integer register writes require an integer")
+        raw = (value & UINT64_MASK).to_bytes(8, byteorder=self.endian)
+        self.devices[reg_idx].mem[:8] = raw
+
+    def set_reg_as(self, reg_idx: int, value: float | int, kind: str = "n"):
+        if not isinstance(reg_idx, int) or not 0 <= reg_idx < 16:
+            raise IndexError(f"Register index {reg_idx!r} out of range (0-15)")
+        if reg_idx in self.INDEX_TO_SPECIAL:
+            raise PermissionError(f"R{reg_idx} is a read-only special register")
+        prefix = ">" if self.endian == "big" else "<"
+        kind = kind.lower()
+        if kind == "f":
+            raw = struct.pack(f"{prefix}d", float(value))
+        elif kind == "s":
+            raw = struct.pack(f"{prefix}Q", int(value) & UINT64_MASK)
+        elif kind == "n":
+            raw = (int(value) & UINT64_MASK).to_bytes(8, byteorder=self.endian)
+        else:
+            raise ValueError("Register kind must be 'n', 's', or 'f'")
+        self.devices[reg_idx].mem[:8] = raw
 
     def get_reg_bits(self, reg_idx: int, start_bit: int, end_bit: int) -> int:
-        """Convenience wrapper to read bits [0..63] by register number (0-15)."""
         if not 0 <= reg_idx < 16:
-            raise IndexError(f"Register index {reg_idx} out of range (0-15)")
-        return super().get_bits(reg_idx * 8, start_bit, end_bit, num_bytes=8)
+            raise IndexError("Register index out of range (0-15)")
+        return _extract_bits(self.get_reg(reg_idx), start_bit, end_bit, 64)
 
-    def set_reg_bits(self, reg_idx: int, start_bit: int, end_bit: int, value: int):
-        """Convenience wrapper to write bits [0..63] by register number (0-15)."""
+    def set_reg_bits(self, reg_idx: int, start_bit: int, end_bit: int,
+                     value: int):
         if not 0 <= reg_idx < 16:
-            raise IndexError(f"Register index {reg_idx} out of range (0-15)")
-        super().set_bits(reg_idx * 8, start_bit, end_bit, value, num_bytes=8)
+            raise IndexError("Register index out of range (0-15)")
+        if reg_idx in self.INDEX_TO_SPECIAL:
+            raise PermissionError(f"R{reg_idx} is a read-only special register")
+        original = self.get_reg(reg_idx)
+        updated = _insert_bits(original, start_bit, end_bit, value, 64)
+        self.set_reg(reg_idx, updated)
 
-import pygame
 
 class VideoMemory(MemoryDevice):
     def __init__(self, width: int = 128, height: int = 128):
@@ -237,76 +300,94 @@ class VideoMemory(MemoryDevice):
         self.height = height
 
     def to_rgb_bytes(self) -> bytes:
-        """Converts RGB332 pixels into RGB24."""
         out = bytearray(self.size * 3)
-
-        for i, byte in enumerate(self.mem):
-            base = i * 3
-            out[base] = ((byte >> 5) & 0b111) * 36
-            out[base + 1] = ((byte >> 2) & 0b111) * 36
-            out[base + 2] = (byte & 0b11) * 85
-
+        for index, pixel in enumerate(self.mem):
+            base = index * 3
+            red = (pixel >> 5) & 0b111
+            green = (pixel >> 2) & 0b111
+            blue = pixel & 0b11
+            out[base] = (red * 255) // 7
+            out[base + 1] = (green * 255) // 7
+            out[base + 2] = blue * 85
         return bytes(out)
 
-    def start_screen(self, scale: int = 4, fps: int = 60):
-        """Opens a window displaying video memory."""
+    def start_screen(self, scale: int = 4, fps: int = 60,
+                     stop_event: threading.Event | None = None):
+        # Pygame's display/event loop stays on the main thread.
+        try:
+            import pygame
+        except ImportError as exc:
+            raise RuntimeError(
+                "Pygame is required for the Arctan64 display. "
+                "Install it with: python3 -m pip install pygame"
+            ) from exc
+
+        if scale < 1 or fps < 1:
+            raise ValueError("scale and fps must be positive")
+
         pygame.init()
-
-        screen = pygame.display.set_mode((
-            self.width * scale,
-            self.height * scale
-        ))
-
+        screen = pygame.display.set_mode(
+            (self.width * scale, self.height * scale)
+        )
         pygame.display.set_caption("Arctan64 Display")
-
         clock = pygame.time.Clock()
         running = True
 
-        while running:
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    running = False
+        try:
+            while running and (stop_event is None or not stop_event.is_set()):
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        running = False
 
-            rgb = self.to_rgb_bytes()
+                rgb = self.to_rgb_bytes()
+                surface = pygame.image.frombuffer(
+                    rgb, (self.width, self.height), "RGB"
+                )
+                scaled = pygame.transform.scale(
+                    surface, (self.width * scale, self.height * scale)
+                )
+                screen.blit(scaled, (0, 0))
+                pygame.display.flip()
+                clock.tick(fps)
+        finally:
+            pygame.quit()
 
-            surface = pygame.image.frombuffer(
-                rgb,
-                (self.width, self.height),
-                "RGB"
-            )
 
-            scaled = pygame.transform.scale(
-                surface,
-                (self.width * scale, self.height * scale)
-            )
-
-            screen.blit(scaled, (0, 0))
-            pygame.display.flip()
-
-            clock.tick(fps)
-
-        pygame.quit()
-
-""" CONFIGS (cfg) """
-
-# 0-based: 'r' = 3 -> 4 bits (0..15), 'n' = 7 -> 8 bits (0..255)
-datatype_len = {
-    "r": 3,
-    "n": 7,
-}
-
-import json
-
+# Load and validate the instruction table.
 try:
-    with open("configs.json", "r", encoding="utf-8") as f:
-        _cfg = json.load(f)
-        inst_format = _cfg["inst_format"]
-        instruction = {name: idx for idx, name in enumerate(inst_format)}
+    with (BASE_DIR / "configs.json").open("r", encoding="utf-8") as file:
+        _cfg = json.load(file)
+    inst_format = _cfg["inst_format"]
+except FileNotFoundError as exc:
+    raise FileNotFoundError(f"Config file not found: {BASE_DIR / 'configs.json'}") from exc
+except (json.JSONDecodeError, KeyError) as exc:
+    raise ValueError("configs.json must contain a valid 'inst_format' object") from exc
 
-except FileNotFoundError:
-    raise FileNotFoundError("Config file not found")
+if not isinstance(inst_format, dict):
+    raise TypeError("configs.json 'inst_format' must be an object")
 
-OPCODE_TO_INSTR = {v: k for k, v in instruction.items()}
+datatype_len = {"r": 4, "n": 8}
+instruction = {}
+for name, fmt in inst_format.items():
+    mnemonic = name.upper()
+    if mnemonic in instruction:
+        raise ValueError(f"Duplicate instruction mnemonic: {mnemonic}")
+    if not isinstance(fmt, str) or any(kind not in datatype_len for kind in fmt):
+        raise ValueError(f"Invalid operand format for {mnemonic}: {fmt!r}")
+    if sum(datatype_len[kind] for kind in fmt) > OPERAND_BITS:
+        raise ValueError(
+            f"{mnemonic} needs more than {OPERAND_BITS} operand bits"
+        )
+    instruction[mnemonic] = len(instruction)
+
+if len(instruction) > (1 << OPCODE_BITS):
+    raise ValueError(
+        f"Too many instructions ({len(instruction)}); "
+        f"{OPCODE_BITS}-bit opcodes support at most {1 << OPCODE_BITS}"
+    )
+
+OPCODE_TO_INSTR = {opcode: mnemonic for mnemonic, opcode in instruction.items()}
+
 
 DEFAULT_ASM = """
 SET R0 5
@@ -315,37 +396,81 @@ ADD R0 R1 R2
 PRINT R0
 PRINT R1
 PRINT R2
+HALT
 """
 
 
+def _parse_register(token: str, line_number: int) -> int:
+    token = token.upper()
+    if not token.startswith("R") or not token[1:].isdigit():
+        raise ValueError(f"Line {line_number}: expected a register like R0, got {token!r}")
+    value = int(token[1:])
+    if not 0 <= value <= 15:
+        raise ValueError(f"Line {line_number}: register index must be 0..15")
+    return value
+
+
 def assemble_text(asm_text: str) -> bytes:
-    out = bytearray()
-    for line in asm_text.splitlines():
-        code = line.split(";")[0].strip()
+    if not isinstance(asm_text, str):
+        raise TypeError("Assembly source must be text")
+
+    output = bytearray()
+    for line_number, line in enumerate(asm_text.splitlines(), start=1):
+        code = line.split(";", 1)[0].strip()
         if not code:
             continue
+
         parts = code.replace(",", " ").split()
-        mnemonic, operands = parts[0].upper(), parts[1:]
+        mnemonic = parts[0].upper()
+        operands = parts[1:]
 
-        word = (instruction[mnemonic] & 0xF) << 12
-        cursor = 12
-        for kind, raw_op in zip(inst_format[mnemonic], operands):
-            bit_len = datatype_len[kind] + 1
-            cursor -= bit_len
-            val = int(raw_op[1:]) if kind == "r" else int(raw_op)
-            mask = (1 << bit_len) - 1
-            word |= (val & mask) << cursor
+        if mnemonic not in instruction:
+            raise ValueError(f"Line {line_number}: unknown instruction {mnemonic!r}")
 
-        out.extend(word.to_bytes(2, byteorder="big"))
-    return bytes(out)
+        fmt = inst_format[mnemonic]
+        if len(operands) != len(fmt):
+            raise ValueError(
+                f"Line {line_number}: {mnemonic} expects {len(fmt)} operand(s), "
+                f"got {len(operands)}"
+            )
 
+        word = instruction[mnemonic] << OPERAND_BITS
+        cursor = OPERAND_BITS
 
-""" Hardware Devices """
+        for kind, raw_operand in zip(fmt, operands):
+            width = datatype_len[kind]
+            cursor -= width
+
+            if kind == "r":
+                value = _parse_register(raw_operand, line_number)
+            else:
+                try:
+                    value = int(raw_operand, 0)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Line {line_number}: invalid immediate {raw_operand!r}"
+                    ) from exc
+
+            if not 0 <= value < (1 << width):
+                raise ValueError(
+                    f"Line {line_number}: operand {raw_operand!r} "
+                    f"does not fit in {width} bits"
+                )
+            word |= value << cursor
+
+        output.extend(word.to_bytes(INSTRUCTION_BYTES, byteorder="big"))
+
+    return bytes(output)
 
 
 class Motherboard:
     def __init__(self, rom_bytes: bytes | bytearray, ram_size: int = 4096):
         self.rom_length = len(rom_bytes)
+        if self.rom_length % INSTRUCTION_BYTES:
+            raise ValueError(
+                f"ROM length must be a multiple of {INSTRUCTION_BYTES} bytes"
+            )
+
         self.nvfm = MemoryDevice(
             size=max(1024, self.rom_length),
             read_only=True,
@@ -358,151 +483,235 @@ class Motherboard:
         self.mmio.attach(self.fbuffer)
         self.cpu = CPU(self)
 
-    def poweron(self):
-        self.cpu.is_reading_nvfm = True
+    def poweron(self, show_screen: bool = True, scale: int = 4, fps: int = 60):
         self.cpu.is_halted = False
 
-        self.fbuffer.start_screen(scale=4, fps=60)
-        while self.cpu.is_halted == False:
-            self.cpu.step()
+        if not show_screen:
+            self.cpu.run()
+            return
+
+        errors = []
+
+        def cpu_worker():
+            try:
+                self.cpu.run()
+            except BaseException as exc:
+                errors.append(exc)
+                self.cpu.is_halted = True
+
+        worker = threading.Thread(target=cpu_worker, name="Arctan64-CPU")
+        worker.start()
+
+        try:
+            self.fbuffer.start_screen(
+                scale=scale, fps=fps, stop_event=self.cpu.stop_event
+            )
+        except RuntimeError as exc:
+            # A missing Pygame installation should not prevent headless execution.
+            print(f"Display unavailable: {exc}")
+            worker.join()
+        else:
+            if not self.cpu.is_halted:
+                self.cpu.stop_event.set()
+                self.cpu.is_halted = True
+            worker.join()
+
+        if errors:
+            raise errors[0]
 
 
 class CPU:
     def __init__(self, motherboard: Motherboard):
         self.pc = 0
-        self.is_reading_nvfm = True
         self.motherboard = motherboard
         self.rom_length = motherboard.rom_length
         self.register = RegisterManager(endian="big")
         self.eval_bit = False
         self.is_halted = False
+        self.stop_event = threading.Event()
 
-    def _fetch_word(self) -> tuple[int, int]:
-        addr = self.pc * 2
-        if self.is_reading_nvfm:
-            if addr < 0 or addr + 2 > self.rom_length:
-                self.is_halted = True
-                return 0, 16
-            word = int.from_bytes(self.motherboard.nvfm.mem[addr : addr + 2], "big")
-        else:
-            word = self.motherboard.mmio[addr : addr + 2]
-        return word, 16
+    def request_stop(self):
+        self.is_halted = True
+        self.stop_event.set()
+
+    def _fetch_word(self) -> int | None:
+        address = self.pc * INSTRUCTION_BYTES
+
+        if self.pc < 0:
+            raise IndexError(f"Program counter cannot be negative: {self.pc}")
+
+        if address + INSTRUCTION_BYTES > self.rom_length:
+            self.is_halted = True
+            return None
+
+        raw = self.motherboard.nvfm.mem[
+            address:address + INSTRUCTION_BYTES
+        ]
+        return int.from_bytes(raw, byteorder="big")
+
+    @staticmethod
+    def _signed_divide(left: int, right: int) -> int:
+        if right == 0:
+            raise ZeroDivisionError("Arctan64 integer division by zero")
+        quotient = abs(left) // abs(right)
+        return -quotient if (left < 0) != (right < 0) else quotient
 
     def step(self):
-        word, width = self._fetch_word()
-        opcode = _extract_bits(word, width - 4, width - 1, width)
-        instr = OPCODE_TO_INSTR[opcode]
+        if self.is_halted:
+            return
 
-        cursor = width - 4
+        word = self._fetch_word()
+        if word is None:
+            return
+
+        opcode = _extract_bits(
+            word, OPERAND_BITS, INSTRUCTION_BITS - 1, INSTRUCTION_BITS
+        )
+        mnemonic = OPCODE_TO_INSTR.get(opcode)
+        if mnemonic is None:
+            raise ValueError(
+                f"Invalid opcode {opcode} at instruction address {self.pc}"
+            )
+
+        fmt = inst_format[mnemonic]
+        cursor = OPERAND_BITS
         args = []
-        for kind in inst_format[instr]:
-            bit_len = datatype_len[kind] + 1
-            end_bit = cursor - 1
-            start_bit = end_bit - bit_len + 1
-            args.append(_extract_bits(word, start_bit, end_bit, width))
-            cursor = start_bit
 
-        match instr:
+        for kind in fmt:
+            width = datatype_len[kind]
+            cursor -= width
+            args.append(_extract_bits(word, cursor, cursor + width - 1,
+                                      INSTRUCTION_BITS))
+
+        next_pc = self.pc + 1
+
+        match mnemonic:
             case "SET":
                 self.register.set_reg(args[0], args[1])
+
             case "MOV":
                 self.register.set_reg(args[0], self.register.get_reg(args[1]))
 
             case "ADD":
-                val = self.register.get_reg(args[0]) + self.register.get_reg(args[1])
-                self.register.set_reg(args[2], val)
+                self.register.set_reg(
+                    args[2],
+                    self.register.get_reg(args[0]) + self.register.get_reg(args[1])
+                )
             case "SUB":
-                val = self.register.get_reg(args[0]) - self.register.get_reg(args[1])
-                self.register.set_reg(args[2], val)
+                self.register.set_reg(
+                    args[2],
+                    self.register.get_reg(args[0]) - self.register.get_reg(args[1])
+                )
             case "MUL":
-                val = self.register.get_reg(args[0]) * self.register.get_reg(args[1])
-                self.register.set_reg(args[2], val)
+                self.register.set_reg(
+                    args[2],
+                    self.register.get_reg(args[0]) * self.register.get_reg(args[1])
+                )
             case "DIV":
-                val = round( self.register.get_reg(args[0]) / self.register.get_reg(args[1]) )
-                self.register.set_reg(args[2], val)
-
-            case "IADD":
-                val = self.register.get_reg(args[0]) + args[1]
-                self.register.set_reg(args[2], val)
-            case "ISUB":
-                val = self.register.get_reg(args[0]) - args[1]
-                self.register.set_reg(args[2], val)
-            case "IMUL":
-                val = self.register.get_reg(args[0]) * args[1]
-                self.register.set_reg(args[2], val)
-            case "IDIV":
-                val = round(self.register.get_reg(args[0]) / args[1])
-                self.register.set_reg(args[2], val)
+                divisor = self.register.get_reg(args[1])
+                if divisor == 0:
+                    raise ZeroDivisionError("DIV by zero")
+                self.register.set_reg(
+                    args[2], self.register.get_reg(args[0]) // divisor
+                )
 
             case "SADD":
-                val = self.register.get_reg_as(args[0], 's') + self.register.get_reg_as(args[1], 's')
-                self.register.set_reg(args[2], val)
+                self.register.set_reg(
+                    args[2],
+                    self.register.get_reg_as(args[0], "s")
+                    + self.register.get_reg_as(args[1], "s")
+                )
             case "SSUB":
-                val = self.register.get_reg_as(args[0], 's') - self.register.get_reg_as(args[1], 's')
-                self.register.set_reg(args[2], val)
+                self.register.set_reg(
+                    args[2],
+                    self.register.get_reg_as(args[0], "s")
+                    - self.register.get_reg_as(args[1], "s")
+                )
             case "SMUL":
-                val = self.register.get_reg_as(args[0], 's') * self.register.get_reg_as(args[1], 's')
-                self.register.set_reg(args[2], val)
+                self.register.set_reg(
+                    args[2],
+                    self.register.get_reg_as(args[0], "s")
+                    * self.register.get_reg_as(args[1], "s")
+                )
             case "SDIV":
-                val = round(self.register.get_reg_as(args[0], 's') / self.register.get_reg_as(args[1], 's'))
-                self.register.set_reg(args[2], val)
-
-            case "FADD":
-                val = self.register.get_reg_as(args[0], 'f') + self.register.get_reg_as(args[1], 'f')
-                self.register.set_reg(args[2], val)
-            case "FSUB":
-                val = self.register.get_reg_as(args[0], 'f') - self.register.get_reg_as(args[1], 'f')
-                self.register.set_reg(args[2], val)
-            case "FMUL":
-                val = self.register.get_reg_as(args[0], 'f') * self.register.get_reg_as(args[1], 'f')
-                self.register.set_reg(args[2], val)
-            case "FDIV":
-                val = round( self.register.get_reg_as(args[0], 'f') / self.register.get_reg_as(args[1], 'f') )
-                self.register.set_reg(args[2], val)
+                left = self.register.get_reg_as(args[0], "s")
+                right = self.register.get_reg_as(args[1], "s")
+                self.register.set_reg(args[2], self._signed_divide(left, right))
 
             case "PRINT":
                 print(self.register.get_reg(args[0]))
+
             case "EVAL_ET":
-                self.eval_bit = self.register.get_reg(args[0]) == self.register.get_reg(args[1])
+                self.eval_bit = (
+                    self.register.get_reg(args[0]) == self.register.get_reg(args[1])
+                )
             case "EVAL_NET":
-                self.eval_bit = self.register.get_reg(args[0]) != self.register.get_reg(args[1])
+                self.eval_bit = (
+                    self.register.get_reg(args[0]) != self.register.get_reg(args[1])
+                )
             case "EVAL_GT":
-                self.eval_bit = self.register.get_reg(args[0]) < self.register.get_reg(args[1])
+                self.eval_bit = (
+                    self.register.get_reg(args[0]) > self.register.get_reg(args[1])
+                )
             case "EVAL_LT":
-                self.eval_bit = self.register.get_reg(args[0]) > self.register.get_reg(args[1])
+                self.eval_bit = (
+                    self.register.get_reg(args[0]) < self.register.get_reg(args[1])
+                )
             case "EVAL_GTE":
-                self.eval_bit = self.register.get_reg(args[0]) <= self.register.get_reg(args[1])
+                self.eval_bit = (
+                    self.register.get_reg(args[0]) >= self.register.get_reg(args[1])
+                )
             case "EVAL_LTE":
-                self.eval_bit = self.register.get_reg(args[0]) >= self.register.get_reg(args[1])
+                self.eval_bit = (
+                    self.register.get_reg(args[0]) <= self.register.get_reg(args[1])
+                )
+
             case "JMP":
-                self.pc = self.register.get_reg(args[0]) - 1
+                next_pc = self.register.get_reg(args[0])
             case "JMPIF":
-                if self.eval_bit == True:
-                    self.pc = self.register.get_reg(args[0]) - 1
+                if self.eval_bit:
+                    next_pc = self.register.get_reg(args[0])
+
+            case "PUSHFLAG":
+                # Store the current condition flag (0 or 1) in the given register.
+                self.register.set_reg(args[0], int(self.eval_bit))
+
             case "HALT":
                 self.is_halted = True
 
-        self.pc += 1
+            case _:
+                raise NotImplementedError(
+                    f"Instruction {mnemonic} has no CPU implementation"
+                )
+
+        self.pc = next_pc
         self.register.tick()
 
+    def run(self):
+        while not self.is_halted and not self.stop_event.is_set():
+            self.step()
 
-""" MAIN CODE """
 
-if __name__ == "__main__":
-    if os.path.exists("nvfm_code.asm"):
-        with open("nvfm_code.asm", "r", encoding="utf-8") as f:
-            program_bytes = assemble_text(f.read())
+def main():
+    asm_path = BASE_DIR / "nvfm_code.asm"
+    bin_path = BASE_DIR / "nvfm_code.bin"
+
+    if asm_path.exists():
+        assembly = asm_path.read_text(encoding="utf-8")
     else:
-        program_bytes = assemble_text(DEFAULT_ASM)
+        assembly = DEFAULT_ASM
         print("WARNING: NO NVFM BOOTLOADER CODE FOUND")
         print("WARNING: DEFAULTING TO DEFAULT_ASM")
 
-    with open("nvfm_code.bin", "bw") as f:
-        f.write(program_bytes)
+    program_bytes = assemble_text(assembly)
+    bin_path.write_bytes(program_bytes)
 
-    with open("nvfm_code.bin", "br") as f:
-        NVFM_PROGRAM_CODE = f.read()
+    # Re-read the binary just as the original emulator did, so this file is
+    # always the exact byte sequence supplied to the motherboard.
+    program_bytes = bin_path.read_bytes()
+    board = Motherboard(program_bytes)
+    board.poweron(show_screen=True)
 
-    board = Motherboard(NVFM_PROGRAM_CODE)
-    num_instructions = len(NVFM_PROGRAM_CODE) // 2
-    boarad.poweron()
+
+if __name__ == "__main__":
+    main()

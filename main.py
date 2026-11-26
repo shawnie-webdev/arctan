@@ -167,23 +167,20 @@ class RegisterManager(MemoryManager):
             return self.clk_ticks & 0xFFFFFFFFFFFFFFFF
         raise KeyError(f"Unknown special register: {name}")
 
+    def _find_device(self, addr: int) -> tuple[MemoryDevice, int]:
+        # RegisterManager maps exactly one 8-byte device to each register.
+        # Avoid scanning every device for every register access.
+        if not 0 <= addr < 16 * 8:
+            raise IndexError(f"Segmentation fault: unmapped register address {hex(addr)}")
+        reg_idx, offset = divmod(addr, 8)
+        return self.devices[reg_idx], offset
+
     def get_reg(self, reg_idx: int) -> int:
         if not 0 <= reg_idx < 16:
             raise IndexError(f"Register index {reg_idx} out of range (0-15)")
 
-        # Each register is backed by its own 8-byte MemoryDevice. Read that
-        # device directly instead of routing an 8-byte register read through
-        # MemoryManager.__getitem__ byte-by-byte.
-        start = reg_idx * 8
-        dev, offset = self._find_device(start)
-
-        if offset + 8 > dev.size:
-            raise IndexError(f"Register R{reg_idx} crosses a memory-device boundary")
-
-        return int.from_bytes(
-            dev.mem[offset : offset + 8],
-            byteorder=self.endian,
-        )
+        dev = self.devices[reg_idx]
+        return int.from_bytes(dev.mem[:8], byteorder=self.endian)
 
     def get_reg_as(self, reg_idx: int, kind: str = "n") -> float | int:
         """Read register `reg_idx` as:
@@ -207,8 +204,10 @@ class RegisterManager(MemoryManager):
     def set_reg(self, reg_idx: int, value: int):
         if not 0 <= reg_idx < 16:
             raise IndexError(f"Register index {reg_idx} out of range (0-15)")
-        start = reg_idx * 8
-        self[start : start + 8] = value & ((1 << 64) - 1)
+        if value < 0:
+            value &= 0xFFFFFFFFFFFFFFFF
+        dev = self.devices[reg_idx]
+        dev.mem[:8] = (value & 0xFFFFFFFFFFFFFFFF).to_bytes(8, byteorder=self.endian)
 
     def get_reg_bits(self, reg_idx: int, start_bit: int, end_bit: int) -> int:
         """Convenience wrapper to read bits [0..63] by register number (0-15)."""
@@ -316,6 +315,7 @@ class CPU:
         self.pc = 0
         self.is_reading_nvfm = True
         self.motherboard = motherboard
+        self.rom_length = len(motherboard.nvfm.mem)
         self.register = RegisterManager(endian="big")
         self.eval_bit = False
         self.is_halted = False
@@ -323,6 +323,9 @@ class CPU:
     def _fetch_word(self) -> tuple[int, int]:
         addr = self.pc * 2
         if self.is_reading_nvfm:
+            if addr < 0 or addr + 2 > self.rom_length:
+                self.is_halted = True
+                return 0, 16
             word = int.from_bytes(self.motherboard.nvfm.mem[addr : addr + 2], "big")
         else:
             word = self.motherboard.mmio[addr : addr + 2]
@@ -376,7 +379,7 @@ class CPU:
                 self.is_halted = True
 
         self.pc += 1
-        self.register.set_reg(15, self.register.get_reg(15))
+        self.register.tick()
 
 
 """ MAIN CODE """

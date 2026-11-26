@@ -1,0 +1,43 @@
+
+
+Datatypes:
+
+Register: a little memory thingy that can hold a 4 bytessys, Rx | x is a number from 0-15 [R1, R13]
+Types of registers:
+    | Program Counter (PC), litteral program counter, readonly, can be changed with JMP
+    | Random Register (RR), filled with random values, good for making random values
+    |
+Number: a datatype, can be shown as a hex or int like: [0xFF, 255]
+
+NVFM:
+    | This thing is like the small bootloader the CPU runs during startup
+    | Datatypes:
+    | | NVFM_ADDRESS: a address that reads the data from NVFM, like nvfm0x01
+    | | MMIO_ADDRESS: a address that reads the data from MMIO, like mmio0x01
+    |
+    | note: NVFM does NOT ALLOW regular hex [0x01] for memory address pointers
+
+Commands:
+    | SET [REGISTER] [NUMBER] = sets that register to number
+    | MOV [REGISTER] [REGISTER] = copies data from first argument register to second
+    | Arithmetic Operations:
+    | | ADD [REGISTER] [REGISTER] [REGISTER] = adds the first 2 data and outputs it to register 3
+    | | SUB [REGISTER] [REGISTER] [REGISTER] = subtracts the first 2 data and outputs it to register 3
+    | | MUL [REGISTER] [REGISTER] [REGISTER] = multiplies the first 2 data and outputs it to register 3
+    | | DIV [REGISTER] [REGISTER] [REGISTER] = divides the first 2 data and outputs it to register 3
+
+    | | SADD [REGISTER] [REGISTER] [REGISTER] = adds the first 2 data and outputs it to register 3 (signed)
+    | | SSUB [REGISTER] [REGISTER] [REGISTER] = subtracts the first 2 data and outputs it to register 3 (signed)
+    | | SMUL [REGISTER] [REGISTER] [REGISTER] = multiplies the first 2 data and outputs it to register 3 (signed)
+    | | SDIV [REGISTER] [REGISTER] [REGISTER] = divides the first 2 data and outputs it to register 3 (signed)
+
+    | | SHL [REGISTER] [REGISTER] [REGISTER] = shift left the first 2 data and outputs it to register 3
+    | | SHR [REGISTER] [REGISTER] [REGISTER] = shift right the first 2 data and outputs it to register 3
+    | | RTL [REGISTER] [REGISTER] [REGISTER] = rotate left the first 2 data and outputs it to register 3
+    | | RTR [REGISTER] [REGISTER] [REGISTER] = rotate right the first 2 data and outputs it to register 3
+
+    | | ### BITWISE COMMANDS ###
+    | | NOT [REGISTER] [REGISTER]
+    | | AND [REGISTER] [REGISTER] [REGISTER]
+    | | OR [REGISTER] [REGISTER] [REGISTER]
+    | | XOR [REGISTER] [REGISTER] [REGISTER]

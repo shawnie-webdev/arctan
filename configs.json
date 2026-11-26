@@ -1,0 +1,25 @@
+{
+  "inst_format" : {
+    "MOV": "rr",
+    "SET": "rn",
+    "ADD": "rrr",
+    "SUB": "rrr",
+    "MUL": "rrr",
+    "DIV": "rrr",
+    "SADD": "rrr",
+    "SSUB": "rrr",
+    "SMUL": "rrr",
+    "SDIV": "rrr",
+    "PRINT": "r",
+    "EVAL_ET" : "rr",
+    "EVAL_LT" : "rr",
+    "EVAL_GT" : "rr",
+    "EVAL_LTE" : "rr",
+    "EVAL_GTE" : "rr",
+    "EVAL_NET" : "rr",
+    "JMP" : "r",
+    "JMPIF" : "r",
+    "PUSHFLAG" : "r",
+    "HALT" : ""
+  }
+}

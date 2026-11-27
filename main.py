@@ -126,14 +126,33 @@ class MemoryManager:
         self.max_addr = 0
         self.endian = endian
 
-    def attach(self, device: MemoryDevice):
+    def attach(self, device: MemoryDevice, address: int):
+        """Attach a device at an explicit absolute address.
+
+        Address ranges are half-open: [address, address + device.size).
+        Gaps are allowed, but overlapping devices are rejected.
+        """
         if not isinstance(device, MemoryDevice):
             raise TypeError("Only MemoryDevice instances can be attached")
-        device.f = self.max_addr
-        device.t = self.max_addr + device.size
+        if not isinstance(address, int) or isinstance(address, bool) or address < 0:
+            raise ValueError("Device base address must be a non-negative integer")
+        if device.size <= 0:
+            raise ValueError("Cannot attach a zero-sized memory device")
+
+        end_address = address + device.size
+        for existing in self.devices:
+            if address < existing.t and existing.f < end_address:
+                raise ValueError(
+                    f"Address range {address:#x}-{end_address - 1:#x} "
+                    f"overlaps an existing device at {existing.f:#x}-{existing.t - 1:#x}"
+                )
+
+        device.f = address
+        device.t = end_address
         device.endian = self.endian
         self.devices.append(device)
-        self.max_addr = device.t
+        self.devices.sort(key=lambda item: item.f)
+        self.max_addr = max(self.max_addr, end_address)
 
     def _find_device(self, addr: int) -> tuple[MemoryDevice, int]:
         if not isinstance(addr, int) or addr < 0 or addr >= self.max_addr:
@@ -232,7 +251,7 @@ class RegisterManager(MemoryManager):
         super().__init__(endian)
         self.clk_ticks = 0
         for _ in range(16):
-            super().attach(MemoryDevice(size=8, endian=endian))
+            super().attach(MemoryDevice(size=8, endian=endian), address=_ * 8)
 
     def tick(self, steps: int = 1):
         self.clk_ticks = (self.clk_ticks + steps) & UINT64_MASK
@@ -506,9 +525,12 @@ class Motherboard:
             endian=ENDIANNESS,
         )
         self.mmio = MemoryManager(endian=ENDIANNESS)
-        self.mmio.attach(MemoryDevice(size=ram_size, endian=ENDIANNESS))
+        self.mmio.attach(
+            MemoryDevice(size=ram_size, endian=ENDIANNESS),
+            address=0x00000000,
+        )
         self.fbuffer = VideoMemory(width=128, height=128)
-        self.mmio.attach(self.fbuffer)
+        self.mmio.attach(self.fbuffer, address=0x10000000)
         self.cpu = CPU(self)
 
     def poweron(self, show_screen: bool = True, scale: int = 4, fps: int = 60):

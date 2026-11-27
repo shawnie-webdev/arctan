@@ -86,6 +86,25 @@ Operand formats are written in order. For example, `rrr` means three registers, 
 
 All arithmetic results are stored as 64-bit register values. Unsigned arithmetic wraps modulo 2^64. Signed division truncates toward zero. Shift and rotate counts use the low 6 bits, so the effective count is 0-63. `SHR` is logical right shift; `SAR` is arithmetic right shift. Rotations operate on all 64 bits.
 
+## MMIO memory map
+
+Memory-mapped devices are attached to the `MemoryManager` at explicit base
+addresses. The address range is `[address, address + device.size)`. Gaps are
+allowed; overlapping ranges and zero-sized devices are rejected.
+
+Example:
+
+```python
+mmio = MemoryManager(endian=ENDIANNESS)
+mmio.attach(ram, address=0x00000000)
+mmio.attach(gpu, address=0x10000000)
+mmio.attach(uart, address=0x20000000)
+```
+
+The motherboard currently maps RAM at `0x00000000` and the framebuffer at
+`0x10000000`. These are MMIO addresses; NVFM remains a separate read-only
+instruction store.
+
 ## Registers
 
 - R0-R12 are general-purpose registers.

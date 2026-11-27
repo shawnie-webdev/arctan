@@ -470,7 +470,16 @@ def assemble_text(asm_text: str) -> bytes:
                         f"Line {line_number}: invalid immediate {raw_operand!r}"
                     ) from exc
 
-            if not 0 <= value < (1 << width):
+            if kind == "i":
+                minimum = -(1 << (width - 1))
+                maximum = (1 << (width - 1)) - 1
+                if not minimum <= value <= maximum:
+                    raise ValueError(
+                        f"Line {line_number}: signed immediate {value} "
+                        f"must be between {minimum} and {maximum}"
+                    )
+                value &= (1 << width) - 1
+            elif not 0 <= value < (1 << width):
                 raise ValueError(
                     f"Line {line_number}: operand {raw_operand!r} "
                     f"does not fit in {width} bits"
@@ -579,6 +588,16 @@ class CPU:
         quotient = abs(left) // abs(right)
         return -quotient if (left < 0) != (right < 0) else quotient
 
+    @staticmethod
+    def _rotate_left(value: int, count: int) -> int:
+        count &= 63
+        return ((value << count) | (value >> ((64 - count) & 63))) & UINT64_MASK
+
+    @staticmethod
+    def _rotate_right(value: int, count: int) -> int:
+        count &= 63
+        return ((value >> count) | (value << ((64 - count) & 63))) & UINT64_MASK
+
     def step(self):
         if self.is_halted:
             return
@@ -603,8 +622,12 @@ class CPU:
         for kind in fmt:
             width = datatype_len[kind]
             cursor -= width
-            args.append(_extract_bits(word, cursor, cursor + width - 1,
-                                      INSTRUCTION_BITS))
+            raw_value = _extract_bits(
+                word, cursor, cursor + width - 1, INSTRUCTION_BITS
+            )
+            if kind == "i" and raw_value & (1 << (width - 1)):
+                raw_value -= 1 << width
+            args.append(raw_value)
 
         next_pc = self.pc + 1
 
@@ -618,6 +641,38 @@ class CPU:
             case "ADDI":
                 self.register.set_reg(
                     args[2], self.register.get_reg(args[0]) + args[1]
+                )
+            case "SUBI":
+                self.register.set_reg(
+                    args[2], self.register.get_reg(args[0]) - args[1]
+                )
+            case "MULI":
+                self.register.set_reg(
+                    args[2], self.register.get_reg(args[0]) * args[1]
+                )
+            case "DIVI":
+                if args[1] == 0:
+                    raise ZeroDivisionError("DIVI by zero")
+                self.register.set_reg(
+                    args[2], self.register.get_reg(args[0]) // args[1]
+                )
+
+            case "SADDI":
+                self.register.set_reg(
+                    args[2], self.register.get_reg_as(args[0], "s") + args[1]
+                )
+            case "SSUBI":
+                self.register.set_reg(
+                    args[2], self.register.get_reg_as(args[0], "s") - args[1]
+                )
+            case "SMULI":
+                self.register.set_reg(
+                    args[2], self.register.get_reg_as(args[0], "s") * args[1]
+                )
+            case "SDIVI":
+                self.register.set_reg(
+                    args[2],
+                    self._signed_divide(self.register.get_reg_as(args[0], "s"), args[1])
                 )
 
             case "ADD":
@@ -665,6 +720,57 @@ class CPU:
                 left = self.register.get_reg_as(args[0], "s")
                 right = self.register.get_reg_as(args[1], "s")
                 self.register.set_reg(args[2], self._signed_divide(left, right))
+
+            case "AND":
+                self.register.set_reg(
+                    args[2], self.register.get_reg(args[0]) & self.register.get_reg(args[1])
+                )
+            case "OR":
+                self.register.set_reg(
+                    args[2], self.register.get_reg(args[0]) | self.register.get_reg(args[1])
+                )
+            case "XOR":
+                self.register.set_reg(
+                    args[2], self.register.get_reg(args[0]) ^ self.register.get_reg(args[1])
+                )
+            case "NOT":
+                self.register.set_reg(args[1], ~self.register.get_reg(args[0]))
+            case "ANDI":
+                self.register.set_reg(args[2], self.register.get_reg(args[0]) & args[1])
+            case "ORI":
+                self.register.set_reg(args[2], self.register.get_reg(args[0]) | args[1])
+            case "XORI":
+                self.register.set_reg(args[2], self.register.get_reg(args[0]) ^ args[1])
+
+            case "SHL" | "SHR" | "SAR" | "ROL" | "ROR":
+                value = self.register.get_reg(args[0])
+                count = self.register.get_reg(args[1]) & 63
+                if mnemonic == "SHL":
+                    result = (value << count) & UINT64_MASK
+                elif mnemonic == "SHR":
+                    result = value >> count
+                elif mnemonic == "SAR":
+                    result = self.register.get_reg_as(args[0], "s") >> count
+                elif mnemonic == "ROL":
+                    result = self._rotate_left(value, count)
+                else:
+                    result = self._rotate_right(value, count)
+                self.register.set_reg(args[2], result)
+
+            case "SHLI" | "SHRI" | "SARI" | "ROLI" | "RORI":
+                value = self.register.get_reg(args[0])
+                count = args[1] & 63
+                if mnemonic == "SHLI":
+                    result = (value << count) & UINT64_MASK
+                elif mnemonic == "SHRI":
+                    result = value >> count
+                elif mnemonic == "SARI":
+                    result = self.register.get_reg_as(args[0], "s") >> count
+                elif mnemonic == "ROLI":
+                    result = self._rotate_left(value, count)
+                else:
+                    result = self._rotate_right(value, count)
+                self.register.set_reg(args[2], result)
 
             case "PRINT":
                 print(self.register.get_reg(args[0]))

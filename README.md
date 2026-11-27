@@ -39,20 +39,18 @@ The emulator assembles `nvfm_code.asm` itself when it starts. If that file does 
 
 ## Instruction encoding
 
-The encoding is defined in `configs.json`, which is shared by the assembler and emulator.
-
-The current architecture uses:
+The encoding is defined in `configs.json`, shared by the assembler and emulator.
 
 | Property | Value |
 |---|---:|
 | Instruction size | 3 bytes (24 bits) |
-| Opcode | 5 bits |
-| Operand area | 19 bits |
+| Opcode | 6 bits |
+| Operand area | 18 bits |
 | Registers | 16 |
 | Register width | 64 bits |
 | Byte order | Big-endian |
 
-The 5-bit opcode supports up to 32 distinct instructions. Each configured instruction is assigned an opcode based on its order in `inst_format`. Keep the instruction order unchanged if you need existing binary files to retain their opcode assignments.
+The 6-bit opcode supports 64 distinct instructions. Opcodes are assigned by the order of entries in `inst_format`. New instructions are appended to preserve existing opcode numbers where possible. Changing the opcode width changes the binary encoding, so reassemble old programs.
 
 Operand types:
 
@@ -60,24 +58,33 @@ Operand types:
 |---|---:|---|
 | `r` | 4 bits | Register index, R0-R15 |
 | `n` | 8 bits | Unsigned immediate, 0-255 |
+| `i` | 8 bits | Signed immediate, -128 to 127 (two's complement) |
 
-Operand formats are written in order. For example, `rrr` means three register operands and `rn` means a register followed by an immediate.
+Operand formats are written in order. For example, `rrr` means three registers, `rnr` means register/immediate/register, and `rir` means register/signed-immediate/register.
 
-## Configured instructions
+## Instruction set
 
 | Instruction | Format | Purpose |
 |---|---|---|
-| `MOV` | `rr` | Copy one register into another |
-| `SET` | `rn` | Set a register to an immediate |
-| `ADD`, `SUB`, `MUL`, `DIV` | `rrr` | Unsigned register-register arithmetic |\n| `ADDI` | `rnr` | Add an 8-bit immediate to a register and store the result in a destination register |
-| `SADD`, `SSUB`, `SMUL`, `SDIV` | `rrr` | Signed arithmetic |
+| `MOV` | `rr` | Copy a register |
+| `SET` | `rn` | Set a register to an unsigned immediate |
+| `ADD`, `SUB`, `MUL`, `DIV` | `rrr` | Unsigned register arithmetic |
+| `ADDI`, `SUBI`, `MULI`, `DIVI` | `rnr` | Unsigned arithmetic with an 8-bit immediate |
+| `SADD`, `SSUB`, `SMUL`, `SDIV` | `rrr` | Signed register arithmetic |
+| `SADDI`, `SSUBI`, `SMULI`, `SDIVI` | `rir` | Signed arithmetic with a signed 8-bit immediate |
+| `AND`, `OR`, `XOR` | `rrr` | Bitwise register operations |
+| `NOT` | `rr` | Bitwise complement |
+| `ANDI`, `ORI`, `XORI` | `rnr` | Bitwise operations with an unsigned immediate |
+| `SHL`, `SHR`, `SAR`, `ROL`, `ROR` | `rrr` | Shift or rotate by a count held in a register |
+| `SHLI`, `SHRI`, `SARI`, `ROLI`, `RORI` | `rnr` | Shift or rotate by an immediate count |
 | `PRINT` | `r` | Print a register value |
 | `EVAL_ET`, `EVAL_NET` | `rr` | Equality / inequality comparison |
 | `EVAL_LT`, `EVAL_GT`, `EVAL_LTE`, `EVAL_GTE` | `rr` | Relational comparison |
-| `JMP` | `r` | Jump to the address in a register |
-| `JMPIF` | `r` | Jump if the evaluation flag is true |
+| `JMP`, `JMPIF` | `r` | Unconditional / conditional jump |
 | `PUSHFLAG` | `r` | Copy the evaluation flag (0 or 1) to a register |
 | `HALT` | empty | Stop the CPU |
+
+All arithmetic results are stored as 64-bit register values. Unsigned arithmetic wraps modulo 2^64. Signed division truncates toward zero. Shift and rotate counts use the low 6 bits, so the effective count is 0-63. `SHR` is logical right shift; `SAR` is arithmetic right shift. Rotations operate on all 64 bits.
 
 ## Registers
 
@@ -91,18 +98,24 @@ The special registers are read-only.
 ## Assembly example
 
 ```asm
-SET R0 5
-SET R1 10
-ADD R0 R1 R2
-EVAL_GT R1 R0
-PUSHFLAG R3
+SET R0 10
+ADDI R0 5 R1
+SUBI R1 3 R2
+MULI R2 2 R3
+DIVI R3 4 R4
+SET R5 1
+SHLI R5 4 R6
+ROLI R6 4 R7
+PRINT R1
 PRINT R2
 PRINT R3
+PRINT R4
+PRINT R7
 HALT
 ```
 
-Immediate values currently support decimal and Python-style prefixed integer notation, such as `0x10`. `ADDI` uses the operand order `ADDI source_register immediate destination_register`, for example `ADDI R1 5 R2`. Register operands must use the `R0` through `R15` form. Comments begin with a semicolon.
+Immediate values accept decimal or Python-style prefixed notation such as `0x10`. Signed immediates accept values from -128 through 127. Comments begin with a semicolon.
 
 ## Binary compatibility
 
-The current instruction format is 24-bit. Binaries assembled for the earlier 16-bit format are not compatible. Reassemble source files with the current `compile.py` or let `main.py` rebuild the binary from `nvfm_code.asm`.
+The instruction size remains 24 bits, but the opcode field is now 6 bits instead of 5. Binaries assembled with the previous opcode layout are not compatible. Reassemble source files with the current `compile.py`.

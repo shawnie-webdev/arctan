@@ -38,6 +38,7 @@
         "JMP": "r",
         "JMPIF": "r",
         "PUSHFLAG": "r",
-        "HALT": ""
+        "HALT": "",
+        "ADDI": "rnr"
     }
 }

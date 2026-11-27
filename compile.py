@@ -145,7 +145,16 @@ def assemble_text(asm_text, config=None):
                         f"Line {line_number}: invalid immediate {raw_operand!r}"
                     ) from exc
 
-            if not 0 <= value < (1 << width):
+            if kind == "i":
+                minimum = -(1 << (width - 1))
+                maximum = (1 << (width - 1)) - 1
+                if not minimum <= value <= maximum:
+                    raise ValueError(
+                        f"Line {line_number}: signed immediate {value} "
+                        f"must be between {minimum} and {maximum}"
+                    )
+                value &= (1 << width) - 1
+            elif not 0 <= value < (1 << width):
                 raise ValueError(
                     f"Line {line_number}: operand {raw_operand!r} does not fit "
                     f"in {width} bits"

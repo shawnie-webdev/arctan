@@ -615,6 +615,11 @@ class CPU:
             case "MOV":
                 self.register.set_reg(args[0], self.register.get_reg(args[1]))
 
+            case "ADDI":
+                self.register.set_reg(
+                    args[2], self.register.get_reg(args[0]) + args[1]
+                )
+
             case "ADD":
                 self.register.set_reg(
                     args[2],

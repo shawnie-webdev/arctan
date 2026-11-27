@@ -2,7 +2,7 @@
     "architecture": {
         "name": "Arctan64",
         "instruction_size_bytes": 3,
-        "opcode_bits": 5,
+        "opcode_bits": 6,
         "endianness": "big",
         "register_count": 16,
         "register_width_bits": 64
@@ -15,6 +15,10 @@
         "n": {
             "bits": 8,
             "description": "Unsigned immediate (0-255)"
+        },
+        "i": {
+            "bits": 8,
+            "description": "Signed immediate (-128 to 127), encoded in two's complement"
         }
     },
     "inst_format": {
@@ -39,6 +43,30 @@
         "JMPIF": "r",
         "PUSHFLAG": "r",
         "HALT": "",
-        "ADDI": "rnr"
+        "ADDI": "rnr",
+        "SUBI": "rnr",
+        "MULI": "rnr",
+        "DIVI": "rnr",
+        "SADDI": "rir",
+        "SSUBI": "rir",
+        "SMULI": "rir",
+        "SDIVI": "rir",
+        "AND": "rrr",
+        "OR": "rrr",
+        "XOR": "rrr",
+        "NOT": "rr",
+        "ANDI": "rnr",
+        "ORI": "rnr",
+        "XORI": "rnr",
+        "SHL": "rrr",
+        "SHR": "rrr",
+        "SAR": "rrr",
+        "ROL": "rrr",
+        "ROR": "rrr",
+        "SHLI": "rnr",
+        "SHRI": "rnr",
+        "SARI": "rnr",
+        "ROLI": "rnr",
+        "RORI": "rnr"
     }
 }

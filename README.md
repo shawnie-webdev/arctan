@@ -69,7 +69,7 @@ Operand formats are written in order. For example, `rrr` means three register op
 |---|---|---|
 | `MOV` | `rr` | Copy one register into another |
 | `SET` | `rn` | Set a register to an immediate |
-| `ADD`, `SUB`, `MUL`, `DIV` | `rrr` | Unsigned arithmetic |
+| `ADD`, `SUB`, `MUL`, `DIV` | `rrr` | Unsigned register-register arithmetic |\n| `ADDI` | `rnr` | Add an 8-bit immediate to a register and store the result in a destination register |
 | `SADD`, `SSUB`, `SMUL`, `SDIV` | `rrr` | Signed arithmetic |
 | `PRINT` | `r` | Print a register value |
 | `EVAL_ET`, `EVAL_NET` | `rr` | Equality / inequality comparison |
@@ -101,7 +101,7 @@ PRINT R3
 HALT
 ```
 
-Immediate values currently support decimal and Python-style prefixed integer notation, such as `0x10`. Register operands must use the `R0` through `R15` form. Comments begin with a semicolon.
+Immediate values currently support decimal and Python-style prefixed integer notation, such as `0x10`. `ADDI` uses the operand order `ADDI source_register immediate destination_register`, for example `ADDI R1 5 R2`. Register operands must use the `R0` through `R15` form. Comments begin with a semicolon.
 
 ## Binary compatibility
 
